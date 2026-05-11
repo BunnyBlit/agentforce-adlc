@@ -15,8 +15,16 @@ PID_DigitalAgent (typically included with Agentforce licenses)
 | **Einstein Agent User?** | Required | Not needed |
 | **System PS (`AgentforceServiceAgentUser`)** | Required | Not needed |
 | **Custom PS (`{AgentName}_Access`)** | Assigned to agent user | Assigned to employees |
+| **Data Cloud permset/PSL** (one of `GenieDataPlatformStarterPsl` PSL, `GenieUserEnhancedSecurity` PS, or `DataCloudUser` PS) | **Required when agent has `knowledge:` block** | Not needed |
 | **`default_agent_user` in config** | Required | Omit entirely |
 | **Respects Sharing Rules** | No (consistent permissions) | Yes (user's data access) |
+
+> **Why the Data Cloud permset name varies:** which permset/PSL grants Data Cloud access depends on org shape (scratch / Dev Edition / Trailhead trial / sandbox / production) and platform release. Three names are seen in the wild:
+> - `GenieDataPlatformStarterPsl` — a Permission Set License (assigned via `PermissionSetLicenseAssign`, not `PermissionSetAssignment`).
+> - `GenieUserEnhancedSecurity` — a Permission Set, label "Data Cloud User".
+> - `DataCloudUser` — a Permission Set on some org shapes.
+>
+> The skill discovers which one exists in this org, then assigns it (Step 3b below). Hardcoding any single name fails on at least one org shape.
 
 **How to check agent type**: Look at the `agent_type` field in the `config:` block of your `.agent` file, or query: `sf data query --json --query "SELECT DeveloperName, Type FROM BotDefinition WHERE DeveloperName = 'AgentName'" -o TARGET_ORG`
 
@@ -61,6 +69,11 @@ sf org assign permset --json \
   --on-behalf-of <agent_name>_user@<orgId>.ext \
   -o TARGET_ORG
 
+# Step 3b: Assign Data Cloud access (ONLY if agent has knowledge: block)
+# Discovery-then-assign — see "Step 3b" section below for full procedure
+# and Data Space scope manual fallback. Skip this step entirely for agents
+# without knowledge grounding.
+
 # Step 4: Deploy Custom Permission Set (3 minutes)
 # (Create the .permissionset-meta.xml file first - see Section 3.2 template)
 sf project deploy start --json \
@@ -79,6 +92,12 @@ sf data query --json \
   -o TARGET_ORG
 
 # Expected: AgentforceServiceAgentUser + <AgentName>_Access
+#           Plus a Data Cloud permset/PSL if the agent has a knowledge: block (Step 3b)
+#
+# To check PSL assignments (different SObject than permsets):
+sf data query --json \
+  --query "SELECT PermissionSetLicense.DeveloperName FROM PermissionSetLicenseAssign WHERE Assignee.Username = '<agent_name>_user@<orgId>.ext'" \
+  -o TARGET_ORG
 
 # Step 6: Deploy Agent Bundle (unpublished metadata)
 sf project deploy start --json \
@@ -108,6 +127,91 @@ Critical notes:
 - Always test with preview BEFORE publishing to avoid version management overhead
 - Assign `AgentforceServiceAgentUser` BEFORE publishing to prevent "Internal Error"
 - Publishing does NOT activate — you must run `sf agent activate` separately
+
+---
+
+## Step 3b: Assign Data Cloud Access (Knowledge-Grounded Service Agents Only)
+
+Run this ONLY when the agent has a top-level `knowledge:` block (i.e., it grounds answers on an Agentforce Data Library). Without Data Cloud access, the agent user cannot read the ADL's data space and `AnswerQuestionsWithKnowledge` returns empty `knowledgeSummary` — the anti-hallucination guard then refuses every utterance.
+
+Skip this step for non-grounded agents.
+
+### 3b.1 — Discover which Data Cloud permset/PSL exists in this org
+
+Three names are seen in the wild; which one applies depends on org shape and platform release. Run both queries:
+
+```bash
+# (a) Look for the PSL form first (codey-cko2's preferred path):
+sf data query --json \
+  --query "SELECT DeveloperName FROM PermissionSetLicense WHERE DeveloperName = 'GenieDataPlatformStarterPsl' LIMIT 1" \
+  -o TARGET_ORG
+
+# (b) Look for the PS form(s) — the names that test-agent17 found working:
+sf data query --json \
+  --query "SELECT Name, Label FROM PermissionSet WHERE Name IN ('GenieUserEnhancedSecurity', 'DataCloudUser', 'DataCloudArchitect')" \
+  -o TARGET_ORG
+```
+
+Pick **one** to assign, in this priority order:
+
+1. `GenieDataPlatformStarterPsl` (PSL) — if (a) returned a record. Use the PSL flow.
+2. `GenieUserEnhancedSecurity` (PS, label "Data Cloud User") — if (b) returned this name.
+3. `DataCloudUser` (PS) — if (b) returned this name.
+4. `DataCloudArchitect` (PS) — last resort; this is typically an admin permset (over-privileged for an agent user) but if nothing else exists in the org, it works.
+
+If none of the four exist: Data Cloud is likely not provisioned. Run the Step 0 preflight from [Data Library Reference](data-library-reference.md) to confirm; if DC is missing, surface that to the user and skip ADL grounding for this run.
+
+### 3b.2 — Assign
+
+For a **PSL**, use `sf org assign permsetlicense`:
+
+```bash
+sf org assign permsetlicense --json \
+  --name GenieDataPlatformStarterPsl \
+  --on-behalf-of <agent_name>_user@<orgId>.ext \
+  -o TARGET_ORG
+```
+
+For a **PS**, use `sf org assign permset`:
+
+```bash
+sf org assign permset --json \
+  --name <PS_NAME_FROM_DISCOVERY> \
+  --on-behalf-of <agent_name>_user@<orgId>.ext \
+  -o TARGET_ORG
+```
+
+Both are idempotent — re-running on an already-assigned user returns success without effect.
+
+### 3b.3 — Verify what landed (don't trust the apparent-success response)
+
+Apex-driven assignments can silently roll back inside transactions, leaving the user with no permset while the API reports success. Read back from the assignment SObjects directly:
+
+```bash
+# Permsets (PS):
+sf data query --json \
+  --query "SELECT PermissionSet.Name FROM PermissionSetAssignment WHERE Assignee.Username = '<agent_name>_user@<orgId>.ext'" \
+  -o TARGET_ORG
+
+# Permission set licenses (PSL — different SObject):
+sf data query --json \
+  --query "SELECT PermissionSetLicense.DeveloperName FROM PermissionSetLicenseAssign WHERE Assignee.Username = '<agent_name>_user@<orgId>.ext'" \
+  -o TARGET_ORG
+```
+
+The Data Cloud name you assigned in 3b.2 must appear in one of the two result sets. If it does not, the assignment failed silently — surface the failure and try the next-priority name from 3b.1.
+
+### 3b.4 — Data Space scope (UI-only manual fallback if grounded queries still fail)
+
+Some org shapes require a **separate** Data Space scope grant on the assigned permset, in addition to the assignment itself. There is currently no API for this — it must be done in Setup UI.
+
+Do this only if 3b.1–3b.3 succeeded but the agent still returns empty `knowledgeSummary` at runtime:
+
+> Setup → Permission Sets → click the assigned Data Cloud permset → "Data Cloud Data Space Management" under the Apps section → Edit → add the ADL's data space (typically `default`) to the **Enabled Data Spaces** list → Save.
+>
+> The data-space ID can be found via `sf data query --json -q "SELECT Id, DeveloperName FROM DataSpace"`.
+
+After granting the scope, retest with a grounded utterance — the agent should now return populated `knowledgeSummary`.
 
 ---
 

@@ -492,6 +492,14 @@ When modifying an existing agent: if the `.agent` already has a `knowledge:` blo
 
 A complete minimal template lives at `assets/agents/knowledge-grounded.agent`.
 
+### 5. Permission prerequisite — Einstein Agent User Data Cloud access
+
+Wiring the `knowledge:` block and `AnswerQuestionsWithKnowledge` action is only half the work. At runtime, the **Einstein Agent User must hold a Data Cloud permset/PSL** — without it, the action returns empty `knowledgeSummary` for every query, the anti-hallucination guard refuses, and the agent appears broken even though the ADL is fully indexed.
+
+The permset name varies by org shape (`GenieDataPlatformStarterPsl` PSL, `GenieUserEnhancedSecurity` PS, or `DataCloudUser` PS). Don't hardcode a name — run the discovery-then-assign procedure documented at [Agent User Setup, Step 3b](agent-user-setup.md) when the agent has a `knowledge:` block.
+
+If the assignment lands but grounded queries still return empty results, also check the **Data Space scope** on the assigned permset (UI-only, no API) — see [Agent User Setup, Step 3b.4](agent-user-setup.md).
+
 ## Common pitfalls
 
 - `INVALID_SESSION_ID` mid-flow → access token expired. Re-fetch with `sf org display`.
@@ -501,6 +509,7 @@ A complete minimal template lives at `assets/agents/knowledge-grounded.agent`.
 - Top-level `status` stuck on `IN_PROGRESS` with all sub-stages `SUCCESS` → normal. Top-level lag of 10–30 minutes is common (longer for large files). **Do not block on it.** Use `retrieverId is not null` as the readiness gate.
 - Step 5 returns `INVALID_REQUEST_STATE: "One or more files have not been uploaded..."` despite a successful S3 200 → the org's `bypass-s3-file-exist` gate hasn't rolled out. Skip ADL on this pass; the user can upload via the Setup UI later.
 - `.agent` validation fails with `unresolved reference @knowledge.rag_feature_config_id` → the top-level `knowledge:` block is missing or misordered. It must precede `language:` per Core Language Section 2.
+- Agent published, ADL indexed (`retrieverId` populated), but every grounded query returns empty `knowledgeSummary` and the agent refuses → Einstein Agent User lacks Data Cloud access. See "Wiring → Permission prerequisite" above and [Agent User Setup, Step 3b](agent-user-setup.md).
 
 ## Reference
 

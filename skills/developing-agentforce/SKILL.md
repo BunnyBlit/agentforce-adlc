@@ -68,29 +68,28 @@ User wants to build new agent from scratch. ALWAYS use Agent Script. Work with U
 
 Read [CLI for Agents](references/salesforce-cli-for-agents.md) for exact command syntax.
 
-1. **Design** — Read [Design & Agent Spec](references/agent-design-and-spec-creation.md) to draft an Agent Spec. Always ask if you should scan for existing backing logic. Unless instructed otherwise, scan by reading `sfdx-project.json` to identify package directories, then search each for `@InvocableMethod` in `classes/`, `AutoLaunchedFlow` in `flows/`, and template metadata in `promptTemplates/`. Mark matches `EXISTS`; unmatched actions `NEEDS STUB`. Also scan `objects/` for `.object-meta.xml` to discover custom objects — related objects often contain data the agent should expose even when not mentioned in the prompt. **Always save Agent Spec as file.**
-2. **STOP for user approval of Agent Spec.** Present to user. Ask for approval or feedback. **Do not proceed** without approval. Once approved, proceed without stopping unless a step fails.
+1. **Design** — Read [Design & Agent Spec](references/agent-design-and-spec-creation.md) to draft an Agent Spec. Always ask if you should scan for existing backing logic. Unless instructed otherwise, scan by reading `sfdx-project.json` to identify package directories, then search each for `@InvocableMethod` in `classes/`, `AutoLaunchedFlow` in `flows/`, and template metadata in `promptTemplates/`. Mark matches `EXISTS`; unmatched actions `NEEDS STUB`. Also scan `objects/` for `.object-meta.xml` to discover custom objects — related objects often contain data the agent should expose even when not mentioned in the prompt.
+   **If the agent's purpose involves answering from documents** (e.g., "answer customer questions from our product manual", "respond based on a policy guide", "FAQ from a PDF"), ask the user: *"Will this agent answer questions from a document corpus (PDF/DOCX/TXT)? If so, what file path?"* Capture the path in the Spec under a **"Knowledge Grounding"** section. Asking now — during requirements capture — is critical: ADL indexing takes minutes, so we want the file path captured pre-Spec-approval and provisioning kicked off as early as possible.
+   **Always save Agent Spec as file.**
+2. **STOP for user approval of Agent Spec.** Present to user (including the Knowledge Grounding section if present). Ask for approval or feedback. **Do not proceed** without approval. Once approved, proceed without stopping unless a step fails.
 3. **Validate environment prerequisites** — Read [Design & Agent Spec](references/agent-design-and-spec-creation.md), Section 3 (Environment Prerequisites). Based on agent type from design, validate org environment:
    - **Employee agent**: Confirm config block does NOT include `default_agent_user`, `connection messaging:`, or MessagingSession linked variables. Remove if present. See [Examples](references/examples.md) for a complete employee agent example.
    - **Service agent**: Query org for Einstein Agent User. If one exists, confirm username with user. If none, guide user through creation. See [CLI for Agents](references/salesforce-cli-for-agents.md), Section 12 for creation steps and [Agent User Setup](references/agent-user-setup.md) for required permissions.
-   **Do not proceed to code generation until environment is validated.**
+   **3b. Kick off ADL provisioning (only if the Spec has a Knowledge Grounding section).** Read [Data Library Reference](references/data-library-reference.md). Run the Step 0 preflight: `SELECT COUNT() FROM DataKnowledgeSpace` (DC provisioned check), then `GET /einstein/data-libraries` (ADL service health check). If DC is not provisioned, present the A/B choice from that reference. If DC is provisioned but the ADL service returns `400 INTERNAL_ERROR`, surface the "DC up, ADL broken" path and skip grounding for this run. If both checks pass, run the create POST (reference Step 1) to capture `libraryId`. Compute `rag_feature_config_id = "ARFPC_<libraryId>"` from the `libraryId` alone — that's enough to author the bundle. Then start the upload + indexing flow (reference Steps 2–6) **in the background** while authoring continues. Per Rule 5, do not block on async indexing; `retrieverId` is only needed for runtime queries (gated in Step 8). Also kick off the Data Cloud permset assignment for the agent user — see [Agent User Setup](references/agent-user-setup.md), Step 2b for the discovery-then-assign procedure.
+   **Do not proceed to code generation until environment is validated** (ADL provisioning may continue running in background).
 4. **Generate authoring bundle** —
    `sf agent generate authoring-bundle --json --no-spec --name "<Label>" --api-name <Developer_Name>`
-5. **Configure knowledge grounding (optional)** — Ask the user: "Will this agent answer questions from a document corpus (PDF/DOCX/TXT)?"
-   - If **no**, skip this step.
-   - If **yes**, read [Data Library Reference](references/data-library-reference.md). Run the Step 0 preflight: `SELECT COUNT() FROM DataKnowledgeSpace` (DC provisioned check), then `GET /einstein/data-libraries` (ADL service health check). If DC is not provisioned, present the A/B choice from that reference. If DC is provisioned but the ADL service returns `400 INTERNAL_ERROR`, surface the "DC up, ADL broken" path and skip grounding for this run. If both checks pass, run the create POST (reference Step 1) to capture `libraryId`. Compute `rag_feature_config_id = "ARFPC_<libraryId>"` from the `libraryId` alone — that's enough to author the bundle. Then start the upload + indexing flow (reference Steps 2–6) **in the background** while you continue to Step 6 (Write code). Per Rule 5, do not block authoring on async indexing; `retrieverId` is only needed for runtime queries (gated in Step 9).
-   Do NOT provision an ADL preemptively — it consumes Data Cloud quota.
-6. **Write code** — Read [Core Language](references/agent-script-core-language.md) for syntax, block structure, and anti-patterns. Edit generated `.agent` file using reference files and templates. Do not create `.agent` or `bundle-meta.xml` files manually. If Step 5 produced a `libraryId`, include the top-level `knowledge:` block and the `AnswerQuestionsWithKnowledge` action wiring per [Data Library Reference](references/data-library-reference.md), section "Wiring the ADL into Agent Script". The template at `assets/agents/knowledge-grounded.agent` is a copy-modify starting point.
-7. **Validate compilation** —
+5. **Write code** — Read [Core Language](references/agent-script-core-language.md) for syntax, block structure, and anti-patterns. Edit generated `.agent` file using reference files and templates. Do not create `.agent` or `bundle-meta.xml` files manually. If Step 3b produced a `libraryId`, include the top-level `knowledge:` block and the `AnswerQuestionsWithKnowledge` action wiring per [Data Library Reference](references/data-library-reference.md), section "Wiring the ADL into Agent Script". The template at `assets/agents/knowledge-grounded.agent` is a copy-modify starting point.
+6. **Validate compilation** —
    `sf agent validate authoring-bundle --json --api-name <Developer_Name>`
    If validation fails, read [Validation & Debugging](references/agent-validation-and-debugging.md) to diagnose and fix, then re-validate. ALWAYS fix syntax and structural errors before generating backing logic.
-8. **Generate backing logic** — For each action marked NEEDS STUB:
+7. **Generate backing logic** — For each action marked NEEDS STUB:
    `sf template generate apex class --name <ClassName> --output-dir <PACKAGE_DIR>/main/default/classes`
    Replace class body with invocable pattern from [Design & Agent Spec](references/agent-design-and-spec-creation.md). ALWAYS deploy:
    `sf project deploy start --json --metadata ApexClass:<ClassName>`
    ALWAYS fix deploy errors BEFORE generating and deploying next stub.
-9. **Validate behavior** — Read [Validation & Debugging](references/agent-validation-and-debugging.md) for preview workflow and session trace analysis.
-   **If Step 5 provisioned an ADL**, before sending any grounded test utterances confirm the library is queryable: `GET /einstein/data-libraries/$LIBRARY_ID` should return a non-null `retrieverId` ([Data Library Reference](references/data-library-reference.md), Step 6). If still null, wait and re-poll — do not preview yet, the agent will return empty `knowledgeSummary` and the anti-hallucination guard will refuse on every utterance.
+8. **Validate behavior** — Read [Validation & Debugging](references/agent-validation-and-debugging.md) for preview workflow and session trace analysis.
+   **If Step 3b provisioned an ADL**, before sending any grounded test utterances confirm the library is queryable: `GET /einstein/data-libraries/$LIBRARY_ID` should return a non-null `retrieverId` ([Data Library Reference](references/data-library-reference.md), Step 6). If still null, wait and re-poll — do not preview yet, the agent will return empty `knowledgeSummary` and the anti-hallucination guard will refuse on every utterance.
    `sf agent preview start --json --use-live-actions --authoring-bundle <Developer_Name>`
    If actions query data, ground test utterances with:
    `sf data query --json -q "SELECT <Relevant_Fields> FROM <SObject> LIMIT 100"`
@@ -102,15 +101,21 @@ Read [CLI for Agents](references/salesforce-cli-for-agents.md) for exact command
    - Live preview (`--use-live-actions`) tested with representative utterances per subagent
    - Traces confirm correct subagent routing and action invocation
    - User explicitly approves deployment
-10. **Publish** — Publish validates metadata structure, not agent behavior. Every publish creates permanent version number.
-    `sf agent publish authoring-bundle --json --api-name <Developer_Name>`
-    If publish fails, follow troubleshooting checklist in [Metadata & Lifecycle](references/agent-metadata-and-lifecycle.md), Section 5 before retrying.
-11. **Activate** — Makes new version available to users.
+   - **If the agent has a `knowledge:` block**: the Einstein Agent User has a Data Cloud permset/PSL assigned. Verify both:
+     ```bash
+     sf data query --json -q "SELECT PermissionSet.Name FROM PermissionSetAssignment WHERE Assignee.Username='<agent_user>'"
+     sf data query --json -q "SELECT PermissionSetLicense.DeveloperName FROM PermissionSetLicenseAssign WHERE Assignee.Username='<agent_user>'"
+     ```
+     One of `GenieDataPlatformStarterPsl`, `GenieUserEnhancedSecurity`, `DataCloudUser`, or `DataCloudArchitect` must appear in the combined results. If none does, run [Agent User Setup, Step 3b](references/agent-user-setup.md) discovery-then-assign and re-verify before proceeding. If a Data Cloud permset is assigned but a smoke-test grounded query returns empty `knowledgeSummary`, the **Data Space scope** also needs to be granted on that permset — UI-only, see [Agent User Setup, Step 3b.4](references/agent-user-setup.md).
+9. **Publish** — Publish validates metadata structure, not agent behavior. Every publish creates permanent version number.
+   `sf agent publish authoring-bundle --json --api-name <Developer_Name>`
+   If publish fails, follow troubleshooting checklist in [Metadata & Lifecycle](references/agent-metadata-and-lifecycle.md), Section 5 before retrying.
+10. **Activate** — Makes new version available to users.
     `sf agent activate --json --api-name <Developer_Name>`
-12. **Verify published agent** — Preview user-facing behavior AFTER activation with
+11. **Verify published agent** — Preview user-facing behavior AFTER activation with
     `sf agent preview start --json --api-name <Developer_Name>`
     Use `--api-name`, not `--authoring-bundle`.
-13. **Configure end-user access** — ONLY for employee agents. Read [Agent Access Guide](references/agent-access-guide.md) to configure perms and assign access.
+12. **Configure end-user access** — ONLY for employee agents. Read [Agent Access Guide](references/agent-access-guide.md) to configure perms and assign access.
 
 #### Reference Files
 
@@ -178,11 +183,13 @@ User wants to add, remove, or change subagents, actions, instructions, or flow c
 Read [CLI for Agents](references/salesforce-cli-for-agents.md) for exact command syntax.
 
 1. **Comprehend** — If no Agent Spec exists, reverse-engineer first by following "Comprehend an Existing Agent" workflow above.
-2. **Update Agent Spec** — Read [Design & Agent Spec](references/agent-design-and-spec-creation.md) for flow control patterns and backing logic analysis. Modify Agent Spec to reflect intended changes. For new actions, always ask if you should scan for existing backing logic. Unless instructed otherwise, scan by reading `sfdx-project.json` to identify package directories, then search each for `@InvocableMethod` in `classes/`, `AutoLaunchedFlow` in `flows/`, and template metadata in `promptTemplates/`. Mark matches `EXISTS`; unmatched actions `NEEDS STUB`. **Always save updated Agent Spec as file.**
-3. **STOP for user approval of updated Agent Spec.** Present to user. Ask for approval or feedback. **Do not proceed** without approval. Once approved, proceed without stopping unless a step fails.
-4. **Configure knowledge grounding (optional)** — If the modification involves adding, replacing, or removing knowledge grounding, ask: "Will this agent answer questions from a document corpus (PDF/DOCX/TXT)?"
-   - If the `.agent` already has a `knowledge:` block with a populated `rag_feature_config_id`, reuse it. Skip provisioning. (No need to confirm `retrieverId` here — that gate moves to Step 8.)
-   - If a new ADL is needed, follow the same flow as the create workflow: read [Data Library Reference](references/data-library-reference.md), run the Data Cloud preflight, and (if DC is ready) run Step 1 to capture `libraryId`. Compute `rag_feature_config_id = "ARFPC_<libraryId>"` from `libraryId` alone — that's enough to author the bundle. Start the upload + indexing flow (reference Steps 2–6) **in the background** while you continue to Step 5 (Edit code). Per Rule 5, do not block on async indexing.
+2. **Update Agent Spec** — Read [Design & Agent Spec](references/agent-design-and-spec-creation.md) for flow control patterns and backing logic analysis. Modify Agent Spec to reflect intended changes. For new actions, always ask if you should scan for existing backing logic. Unless instructed otherwise, scan by reading `sfdx-project.json` to identify package directories, then search each for `@InvocableMethod` in `classes/`, `AutoLaunchedFlow` in `flows/`, and template metadata in `promptTemplates/`. Mark matches `EXISTS`; unmatched actions `NEEDS STUB`.
+   **If the modification involves adding, replacing, or removing knowledge grounding**, ask: *"Will this agent answer questions from a document corpus (PDF/DOCX/TXT)? If so, what file path?"* Capture the path in the updated Spec under a **"Knowledge Grounding"** section. Asking now — during Spec update — surfaces ADL changes for the user's approval and lets us kick off provisioning right after.
+   **Always save updated Agent Spec as file.**
+3. **STOP for user approval of updated Agent Spec.** Present to user (including the Knowledge Grounding section if present). Ask for approval or feedback. **Do not proceed** without approval. Once approved, proceed without stopping unless a step fails.
+4. **Kick off ADL provisioning (only if the Spec has a Knowledge Grounding section).**
+   - If the `.agent` already has a `knowledge:` block with a populated `rag_feature_config_id` AND the user is keeping the same library, reuse it. Skip provisioning. (No need to confirm `retrieverId` here — that gate moves to Step 8.)
+   - If a new ADL is needed, follow the same flow as the create workflow: read [Data Library Reference](references/data-library-reference.md), run the Step 0 preflight, and (if DC is ready) run Step 1 to capture `libraryId`. Compute `rag_feature_config_id = "ARFPC_<libraryId>"` from `libraryId` alone — that's enough to author the bundle. Start the upload + indexing flow (reference Steps 2–6) **in the background** while you continue to Step 5 (Edit code). Per Rule 5, do not block on async indexing. Also kick off the Data Cloud permset assignment for the agent user — see [Agent User Setup](references/agent-user-setup.md), Step 2b.
    - If grounding is not part of the modification, skip this step.
 5. **Edit code** — Read [Core Language](references/agent-script-core-language.md) for syntax and anti-patterns. Edit `.agent` file to implement approved changes. If Step 4 produced a `libraryId`, include or update the `knowledge:` block and the `AnswerQuestionsWithKnowledge` action per [Data Library Reference](references/data-library-reference.md).
 6. **Validate compilation** —
@@ -206,6 +213,12 @@ Read [CLI for Agents](references/salesforce-cli-for-agents.md) for exact command
    - Live preview (`--use-live-actions`) tested with representative utterances per subagent
    - Traces confirm correct subagent routing and action invocation
    - User explicitly approves deployment
+   - **If the agent has a `knowledge:` block**: the Einstein Agent User has a Data Cloud permset/PSL assigned. Verify both:
+     ```bash
+     sf data query --json -q "SELECT PermissionSet.Name FROM PermissionSetAssignment WHERE Assignee.Username='<agent_user>'"
+     sf data query --json -q "SELECT PermissionSetLicense.DeveloperName FROM PermissionSetLicenseAssign WHERE Assignee.Username='<agent_user>'"
+     ```
+     One of `GenieDataPlatformStarterPsl`, `GenieUserEnhancedSecurity`, `DataCloudUser`, or `DataCloudArchitect` must appear in the combined results. If none does, run [Agent User Setup, Step 3b](references/agent-user-setup.md) discovery-then-assign and re-verify before proceeding. If a Data Cloud permset is assigned but a smoke-test grounded query returns empty `knowledgeSummary`, the **Data Space scope** also needs to be granted on that permset — UI-only, see [Agent User Setup, Step 3b.4](references/agent-user-setup.md).
 9. **Publish** — Publish validates metadata structure, not agent behavior. Every publish creates permanent version number.
    `sf agent publish authoring-bundle --json --api-name <Developer_Name>`
    If publish fails, follow troubleshooting checklist in [Metadata & Lifecycle](references/agent-metadata-and-lifecycle.md), Section 5 before retrying.
@@ -477,6 +490,11 @@ Planner validates ALL actions across ALL subagents at startup. One missing permi
 
 **Apex action returns empty results in live preview but works in simulated:**
 `WITH USER_MODE` + missing object permissions = silent failure (0 rows, no error). See [Agent User Setup & Permissions](references/agent-user-setup.md), Section 6.2.
+
+**Agent published, ADL indexed (`retrieverId` populated), but every grounded question returns empty `knowledgeSummary` / "I don't have that information":**
+The Einstein Agent User lacks Data Cloud access. Two things to check, in order:
+1. **Permset/PSL not assigned.** Run the verification queries from [Agent User Setup, Step 3b.3](references/agent-user-setup.md). If no Data Cloud permset/PSL appears, run the discovery-then-assign procedure (priority: `GenieDataPlatformStarterPsl` PSL → `GenieUserEnhancedSecurity` PS → `DataCloudUser` PS → `DataCloudArchitect` PS).
+2. **Data Space scope not granted on the permset.** Currently no API. Setup → Permission Sets → click the assigned permset → "Data Cloud Data Space Management" under Apps → Edit → add the ADL's data space (usually `default`) → Save. See [Agent User Setup, Step 3b.4](references/agent-user-setup.md).
 
 ## Syntax Quick Reference
 

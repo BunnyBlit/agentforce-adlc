@@ -379,6 +379,8 @@ sf data query --json -q "SELECT Username FROM User WHERE Profile.UserLicense.Nam
 
 After creating the user, continue with permission setup in [Agent User Setup & Permissions](agent-user-setup.md).
 
+**For knowledge-grounded agents (with a `knowledge:` block):** in addition to `AgentforceServiceAgentUser`, also assign a Data Cloud permset/PSL via the discovery-then-assign procedure in [Agent User Setup & Permissions, Step 3b](agent-user-setup.md). Without this, the agent user cannot read the ADL's data space and grounded queries return empty `knowledgeSummary` at runtime.
+
 ---
 
 ## 13. CI/CD Pipeline
