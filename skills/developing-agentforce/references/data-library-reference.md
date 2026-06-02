@@ -1,19 +1,28 @@
 # Data Library Reference (ADL)
 
-How to provision a Files-based Agentforce Data Library (ADL) and wire it into an Agent Script `.agent` file so the agent can answer questions grounded on uploaded documents.
+How to provision an Agentforce Data Library (ADL) and wire it into an Agent Script `.agent` file so the agent can answer questions grounded on uploaded documents, Knowledge articles, or a custom retriever.
 
 This reference is consumed by the **Create an Agent** and **Modify an Existing Agent** workflows in `SKILL.md`. The parent skill decides *whether* to provision an ADL (by asking the user); this file owns *how*.
 
 ## What this reference covers
 
 - **Step 0** — Verify Data Cloud is provisioned. ADL has a hard dependency on Data Cloud.
-- **Steps 1–7** — Create a SFDRIVE library, upload one file via presigned S3 URL, trigger indexing, poll until ready.
-- **Step 8** — Day-2: add more files to an existing library.
-- **Wiring the ADL into Agent Script** — the `knowledge:` block + `AnswerQuestionsWithKnowledge` action.
+- **Part A: SFDRIVE (File Library)** — Steps 1–7: Create library, upload file via presigned S3 URL, trigger indexing, poll until ready. Step 8: Day-2 add more files.
+- **Part B: KNOWLEDGE (Knowledge Article Library)** — Create library with knowledgeConfig, trigger indexing, poll until ready. Day-2: update config fields.
+- **Part C: RETRIEVER (Custom Retriever Library)** — Create library with active retrieverId, immediately ready.
+- **Wiring the ADL into Agent Script** — the `knowledge:` block + `AnswerQuestionsWithKnowledge` action (same for all source types).
 
-What this file deliberately does NOT cover:
-- Knowledge-article (`Knowledge__kav`) libraries via the Setup UI wizard. This skill targets file grounding via the REST API only.
-- Web-crawl sources or custom retrievers.
+## Source type decision guide
+
+Ask the user which grounding source they want:
+
+| Source Type | Use When | Provisioning |
+|-------------|----------|-------------|
+| **SFDRIVE** | User has PDF/TXT/HTML docs to upload | Upload → Index → READY (2-10 min) |
+| **KNOWLEDGE** | Org has Salesforce Knowledge articles | Create → Auto-index from KAV → READY (2-10 min) |
+| **RETRIEVER** | User has an existing active Custom Retriever | Create → Immediately READY (no provisioning) |
+
+If the user says "knowledge base" or "FAQ articles" → KNOWLEDGE. If they say "upload files" or "documents" → SFDRIVE. If they say "I have a retriever" or "custom search" → RETRIEVER.
 
 ## Outputs the parent skill consumes
 
@@ -517,6 +526,244 @@ If the assignment lands but grounded queries still return empty results, also ch
 - Grounding source type: `SFDRIVE` (File)
 - Base path: `/services/data/v66.0/einstein/data-libraries`
 - OpenAPI spec (in this skill): `assets/adl-api-spec.yaml`
+
+---
+
+## Part B: KNOWLEDGE — Knowledge Article Library
+
+Use this when the org has Salesforce Knowledge articles (KAV) and the user wants to ground the agent on article content. No file upload needed — the library indexes directly from Knowledge articles.
+
+### Prerequisites (Knowledge-specific)
+
+- "Knowledge User" enabled for the user
+- Knowledge articles exist in the org (at least one published article)
+- The `isAsyncKnowledgeAdlEnabled` gate must be open on the org
+
+### Step K1 — Create the Knowledge library
+
+Ask the user which Knowledge fields to index. Required: two primary index fields (immutable after creation). Optional: contentFields for additional searchable content.
+
+Common field choices:
+- `ArticleNumber` — unique article identifier
+- `Title` — article title
+- `UrlName` — URL-friendly name
+- `Summary` — article summary
+- Custom fields like `Answer__c`, `Detail__c`
+
+```bash
+ORG_URL=$(sf org display --target-org "$TARGET_ORG" --json | jq -r '.result.instanceUrl')
+ACCESS_TOKEN=$(sf org display --target-org "$TARGET_ORG" --json | jq -r '.result.accessToken')
+
+RESPONSE=$(curl -s -X POST "$ORG_URL/services/data/v66.0/einstein/data-libraries" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "masterLabel": "'"${ADL_NAME}"'",
+    "developerName": "'"${ADL_DEV_NAME}"'",
+    "groundingSource": {
+      "sourceType": "KNOWLEDGE",
+      "knowledgeConfig": {
+        "primaryIndexField1": "ArticleNumber",
+        "primaryIndexField2": "Title",
+        "contentFields": ["Answer__c"],
+        "isRestrictToPublicArticle": false
+      }
+    }
+  }')
+echo "$RESPONSE" | jq '.'
+
+LIBRARY_ID=$(echo "$RESPONSE" | jq -r '.libraryId')
+echo "LIBRARY_ID: $LIBRARY_ID"
+```
+
+Expected: JSON with `libraryId`, `sourceType: "KNOWLEDGE"`, `groundingSource.knowledgeConfig` populated.
+
+### Step K2 — Trigger indexing
+
+```bash
+curl -s -X POST "$ORG_URL/services/data/v66.0/einstein/data-libraries/$LIBRARY_ID/indexing" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" | jq '.'
+```
+
+Expected: `{ "status": "IN_PROGRESS", "message": "Provisioning started" }`
+
+Note: This call may take 30-60s to respond. The server starts processing immediately — if it times out client-side, provisioning still proceeds.
+
+### Step K3 — Poll status until READY
+
+Knowledge libraries provision through these stages: `DATA_STREAM → DATA_LAKE_OBJECT → DATA_MODEL_OBJECT → SEARCH_INDEX → RETRIEVER`
+
+```bash
+while true; do
+  STATUS_RESPONSE=$(curl -s "$ORG_URL/services/data/v66.0/einstein/data-libraries/$LIBRARY_ID/status" \
+    -H "Authorization: Bearer $ACCESS_TOKEN")
+  STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.indexingStatus.status')
+  echo "Status: $STATUS"
+  if [ "$STATUS" = "READY" ] || [ "$STATUS" = "FAILED" ]; then
+    echo "$STATUS_RESPONSE" | jq '.'
+    break
+  fi
+  sleep 10
+done
+```
+
+Note: The top-level `status` may remain `IN_PROGRESS` even after all stages report `SUCCESS`. Check for `retrieverId` on the detail endpoint to confirm true readiness:
+
+```bash
+curl -s "$ORG_URL/services/data/v66.0/einstein/data-libraries/$LIBRARY_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | jq '{libraryId, status, retrieverId}'
+```
+
+Once `retrieverId` is non-null, the library is ready: `rag_feature_config_id = "ARFPC_" + LIBRARY_ID`
+
+### Step K4 (Day-2) — Update Knowledge config
+
+Update which fields are indexed. This triggers full server-side re-indexing.
+
+```bash
+curl -s -X PATCH "$ORG_URL/services/data/v66.0/einstein/data-libraries/$LIBRARY_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "groundingSource": {
+      "sourceType": "KNOWLEDGE",
+      "knowledgeConfig": {
+        "contentFields": ["Answer__c", "Summary__c"],
+        "isRestrictToPublicArticle": true
+      }
+    }
+  }' | jq '.'
+```
+
+Important constraints:
+- `primaryIndexField1` and `primaryIndexField2` are **immutable** after creation
+- Updates are **blocked while provisioning is in progress** (server returns `INVALID_REQUEST_STATE`)
+- Knowledge articles re-index automatically when articles are updated in the org
+- Metadata-only updates (masterLabel, description) do NOT trigger re-indexing
+
+### Knowledge validation errors
+
+| Error | Cause |
+|-------|-------|
+| `MISSING_REQUIRED_FIELD` | primaryIndexField1 or primaryIndexField2 missing |
+| `DUPLICATE_PRIMARY_FIELDS` | Same field for both primary fields |
+| `OVERLAPPING_CONTENT_FIELD` | A contentField matches a primary field |
+| `DUPLICATE_CONTENT_FIELDS` | Same field appears twice in contentFields |
+| `DATA_CATEGORY_NOT_SUPPORTED` | isDataCategoryRuleEnabled=true (not yet supported) |
+| `PRIMARY_FIELDS_IMMUTABLE` | Attempt to change primary fields after creation |
+| `ADL_UNSUPPORTED_SOURCE_TYPE` | Knowledge gate not enabled on org |
+
+---
+
+## Part C: RETRIEVER — Custom Retriever Library
+
+Use this when the user has an existing active Custom Retriever and wants to wrap it in an ADL library. No file upload or indexing needed — the library is immediately ready.
+
+### Prerequisites (Retriever-specific)
+
+- An active Custom Retriever exists in the org (18-char ID with prefix `1Cx` or `0pm`)
+- The retriever must be in active state (inactive retrievers are rejected)
+
+### Finding an active retriever ID
+
+If the user doesn't know their retriever ID, check existing READY libraries:
+
+```bash
+ORG_URL=$(sf org display --target-org "$TARGET_ORG" --json | jq -r '.result.instanceUrl')
+ACCESS_TOKEN=$(sf org display --target-org "$TARGET_ORG" --json | jq -r '.result.accessToken')
+
+# List READY libraries and find retrieverId
+curl -s "$ORG_URL/services/data/v66.0/einstein/data-libraries" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | \
+  jq '.libraries[] | select(.status == "READY") | {libraryId, masterLabel, sourceType}'
+```
+
+Then get the retrieverId from a READY library:
+
+```bash
+curl -s "$ORG_URL/services/data/v66.0/einstein/data-libraries/<READY_LIBRARY_ID>" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | jq '.retrieverId'
+```
+
+### Step R1 — Create the Retriever library
+
+```bash
+RETRIEVER_ID="<active-retriever-id>"
+
+RESPONSE=$(curl -s -X POST "$ORG_URL/services/data/v66.0/einstein/data-libraries" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "masterLabel": "'"${ADL_NAME}"'",
+    "developerName": "'"${ADL_DEV_NAME}"'",
+    "description": "Custom retriever library",
+    "groundingSource": {
+      "sourceType": "RETRIEVER",
+      "retrieverId": "'"${RETRIEVER_ID}"'"
+    }
+  }')
+echo "$RESPONSE" | jq '.'
+
+LIBRARY_ID=$(echo "$RESPONSE" | jq -r '.libraryId')
+echo "LIBRARY_ID: $LIBRARY_ID"
+```
+
+Expected: JSON with `libraryId`, `sourceType: "RETRIEVER"`, `groundingSource.retrieverId` populated. The library is **immediately usable** — no indexing or polling needed.
+
+### Step R2 — Verify READY status
+
+```bash
+curl -s "$ORG_URL/services/data/v66.0/einstein/data-libraries/$LIBRARY_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | jq '{libraryId, status, retrieverId, retrieverLabel}'
+```
+
+Expected: `status: "READY"`, `retrieverId` matches input.
+
+The `rag_feature_config_id = "ARFPC_" + LIBRARY_ID` — wire this into the agent immediately.
+
+### Step R3 (Day-2) — Update metadata or swap retriever
+
+```bash
+# Update metadata
+curl -s -X PATCH "$ORG_URL/services/data/v66.0/einstein/data-libraries/$LIBRARY_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "masterLabel": "Updated Retriever Library",
+    "description": "Updated description"
+  }' | jq '.'
+
+# Swap to a different retriever
+NEW_RETRIEVER_ID="<new-active-retriever-id>"
+curl -s -X PATCH "$ORG_URL/services/data/v66.0/einstein/data-libraries/$LIBRARY_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "groundingSource": {
+      "sourceType": "RETRIEVER",
+      "retrieverId": "'"${NEW_RETRIEVER_ID}"'"
+    }
+  }' | jq '.'
+```
+
+### Retriever validation errors
+
+| Error | Cause |
+|-------|-------|
+| `INVALID_REQUEST_STATE: retriever not active` | retrieverId points to an inactive retriever |
+| `retriever not found` | retrieverId doesn't exist |
+| `retrieverId is required` | sourceType RETRIEVER without retrieverId |
+| `ADL_UNSUPPORTED_SOURCE_TYPE` | File operations (upload, add, indexing) on RETRIEVER library |
+
+### Unsupported operations for RETRIEVER
+
+These endpoints return `400: ADL_UNSUPPORTED_SOURCE_TYPE`:
+- `POST /file-upload-urls`
+- `POST /files`
+- `POST /indexing`
+- `GET /upload-readiness`
+- `DELETE /files/{fileId}`
 
 ---
 
