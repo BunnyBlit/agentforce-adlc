@@ -134,6 +134,22 @@ cd /tmp/adl-setup && sf project deploy start --source-dir main/default/settings/
 
 If this fails, the org may not have the Agentforce license (`EinsteinGPTCopilotAddOn`). STOP and inform the user.
 
+### 0b2. Enable Agent Platform
+
+ADL SFDRIVE creation requires the `AgentPlatformEnabled` org preference in addition to `EinsteinGPTPlatformEnabled`. Deploy the AgentPlatform settings:
+
+```bash
+cat > /tmp/adl-setup/main/default/settings/AgentPlatform.settings-meta.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<AgentPlatformSettings xmlns="http://soap.sforce.com/2006/04/metadata">
+    <enableAgentPlatform>true</enableAgentPlatform>
+</AgentPlatformSettings>
+EOF
+cd /tmp/adl-setup && sf project deploy start --source-dir main/default/settings/AgentPlatform.settings-meta.xml --target-org $TARGET_ORG --json
+```
+
+Without this, `sf agent adl create --source-type sfdrive` returns: `"To create a File data library, enable Agentforce in your org. Required org preferences: EinsteinGPTPlatformEnabled, AgentPlatformEnabled."`
+
 ### 0c. Find required permission sets
 
 ```bash

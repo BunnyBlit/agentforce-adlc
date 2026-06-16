@@ -4,16 +4,162 @@ How to provision an Agentforce Data Library (ADL) and wire it into an Agent Scri
 
 This reference is consumed by the **Create an Agent** and **Modify an Existing Agent** workflows in `SKILL.md`. The parent skill decides *whether* to provision an ADL (by asking the user); this file owns *how*.
 
-## CRITICAL — CLI Only
+## Use `sf agent adl` CLI Commands
 
-**NEVER use raw Connect API calls** (`/services/data/v67.0/einstein/data-libraries`, `curl`, REST endpoints). ALL ADL operations MUST use `sf agent adl` CLI commands:
-- `sf agent adl create` — NOT `POST /einstein/data-libraries`
-- `sf agent adl upload` — NOT presigned URL + S3 PUT
-- `sf agent adl get` / `sf agent adl status` — NOT `GET /einstein/data-libraries/<id>`
-- `sf agent adl update` — NOT `PATCH /einstein/data-libraries/<id>`
-- `sf agent adl list` — NOT `GET /einstein/data-libraries`
+All ADL operations use the `sf agent adl` CLI. The CLI handles authentication, API version negotiation, polling, and error formatting automatically.
 
-The CLI handles authentication, API version negotiation, polling, and error formatting. Raw API calls bypass all of this and will break.
+Available commands:
+
+| Command | Purpose |
+|---------|---------|
+| `sf agent adl create` | Create a new library (SFDRIVE, KNOWLEDGE, or RETRIEVER) |
+| `sf agent adl upload` | Upload file(s) to a SFDRIVE library and trigger indexing |
+| `sf agent adl get` | Get full details of a library (status, retrieverId, config) |
+| `sf agent adl status` | Get indexing stage details |
+| `sf agent adl list` | List all libraries in the org |
+| `sf agent adl update` | Update library metadata, content fields, or swap retriever |
+| `sf agent adl delete` | Permanently delete a library |
+| `sf agent adl file add` | Day-2: add files to an existing SFDRIVE library |
+| `sf agent adl file list` | List files in a SFDRIVE library |
+| `sf agent adl file delete` | Remove a file from a SFDRIVE library |
+
+### CLI Command Reference
+
+#### `sf agent adl create`
+
+Creates a new data library. The `--source-type` determines which additional flags are required.
+
+```
+FLAGS (required):
+  -n, --name=<value>             Display name (max 80 chars)
+  -o, --target-org=<value>       Target org alias or username
+  --developer-name=<value>       API name (alphanumeric + underscores, starts with letter, max 80 chars)
+  --source-type=<option>         sfdrive | knowledge | retriever
+
+FLAGS (optional / conditional):
+  --description=<value>          Description (max 255 chars)
+  --index-mode=<option>          basic | enhanced (SFDRIVE only)
+  --retriever-id=<value>         Active Custom Retriever ID (required for RETRIEVER)
+  --primary-index-field1=<value> First primary index field (required for KNOWLEDGE, immutable)
+  --primary-index-field2=<value> Second primary index field (required for KNOWLEDGE, immutable)
+  --json                         Output as JSON (always use this)
+```
+
+#### `sf agent adl upload`
+
+Uploads file(s) to a SFDRIVE library. Handles presigned URL, S3 upload, indexing trigger, and optional polling.
+
+```
+FLAGS (required):
+  -i, --library-id=<value>    Library ID (18-char, prefix 1JD)
+  -f, --file=<value>...       File path(s) — repeat flag for multiple files
+  -o, --target-org=<value>    Target org
+
+FLAGS (optional):
+  -w, --wait=<value>          Minutes to poll for READY (omit = return immediately)
+  --json                      Output as JSON
+```
+
+#### `sf agent adl get`
+
+Returns full library details including status, retrieverId, and grounding source config.
+
+```
+FLAGS (required):
+  -i, --library-id=<value>    Library ID
+  -o, --target-org=<value>    Target org
+
+FLAGS (optional):
+  --json                      Output as JSON
+```
+
+#### `sf agent adl status`
+
+Returns indexing stage details: `DATA_LAKE_OBJECT → DATA_MODEL_OBJECT → SEARCH_INDEX → INDEXING → RETRIEVER`.
+
+```
+FLAGS (required):
+  -i, --library-id=<value>    Library ID
+  -o, --target-org=<value>    Target org
+
+FLAGS (optional):
+  --json                      Output as JSON
+```
+
+#### `sf agent adl list`
+
+Lists all libraries in the org.
+
+```
+FLAGS (required):
+  -o, --target-org=<value>    Target org
+
+FLAGS (optional):
+  --source-type=<option>      Filter: sfdrive | knowledge | retriever
+  --json                      Output as JSON
+```
+
+#### `sf agent adl update`
+
+Updates mutable properties. Some changes trigger re-indexing.
+
+```
+FLAGS (required):
+  -i, --library-id=<value>    Library ID
+  -o, --target-org=<value>    Target org
+
+FLAGS (optional):
+  -n, --name=<value>                      New display name
+  --description=<value>                   New description
+  --content-fields=<value>                Comma-separated fields (KNOWLEDGE; triggers re-index)
+  --[no-]restrict-to-public-articles      Public articles only (KNOWLEDGE; triggers re-index)
+  --retriever-id=<value>                  Swap retriever (RETRIEVER only; must be active)
+  --json                                  Output as JSON
+```
+
+#### `sf agent adl delete`
+
+Permanently deletes a library and all associated files/indexing data.
+
+```
+FLAGS (required):
+  -i, --library-id=<value>    Library ID
+  -o, --target-org=<value>    Target org
+```
+
+#### `sf agent adl file add`
+
+Day-2 operation: add files to an existing SFDRIVE library (must already be READY).
+
+```
+FLAGS (required):
+  -i, --library-id=<value>    Library ID
+  -f, --path=<value>...       File path(s) — repeat for batch
+  -o, --target-org=<value>    Target org
+
+Constraints: ≥1 file, no duplicate names in batch, max 1000 files per library.
+```
+
+#### `sf agent adl file list`
+
+Lists files in a SFDRIVE library (name, size, creation date).
+
+```
+FLAGS (required):
+  -i, --library-id=<value>    Library ID
+  -o, --target-org=<value>    Target org
+```
+
+#### `sf agent adl file delete`
+
+Removes a file and triggers search index re-hydration.
+
+```
+FLAGS (required):
+  -i, --library-id=<value>    Library ID
+  --file-id=<value>           AiGroundingFileRef record ID
+  -o, --target-org=<value>    Target org
+```
 
 ## Org setup prerequisite
 
@@ -29,9 +175,9 @@ If Step 0 below fails, the org likely hasn't been set up yet — go to [Org Setu
 ## What this reference covers
 
 - **Step 0** — Verify Data Cloud is provisioned. ADL has a hard dependency on Data Cloud.
-- **Part A: SFDRIVE (File Library)** — Steps 1–7: Create library, upload file, trigger indexing, poll until ready. Step 8: Day-2 add more files.
-- **Part B: KNOWLEDGE (Knowledge Article Library)** — Create library with knowledgeConfig, trigger indexing, poll until ready. Day-2: update config fields.
-- **Part C: RETRIEVER (Custom Retriever Library)** — Create library with active retrieverId, immediately ready.
+- **Option A: SFDRIVE (File Library)** — Steps 1–7: Create library, upload file, trigger indexing, poll until ready. Step 8: Day-2 add more files.
+- **Option B: KNOWLEDGE (Knowledge Article Library)** — Create library with knowledgeConfig, trigger indexing, poll until ready. Day-2: update config fields.
+- **Option C: RETRIEVER (Custom Retriever Library)** — Create library with active retrieverId, immediately ready.
 - **Wiring the ADL into Agent Script** — the `knowledge:` block + `AnswerQuestionsWithKnowledge` action (same for all source types).
 
 ## Source type decision guide
@@ -190,7 +336,11 @@ Confirm the file to upload exists and is a supported type (PDF, TXT, HTML). Max 
 - Test queries for preview validation
 - Whether the file is suitable for grounding (empty or corrupt files will fail)
 
-## Step 1 — Create the SFDRIVE library
+## Option A: SFDRIVE — File Library
+
+Use this when the user has PDF, TXT, or HTML documents to upload. The library ingests files, indexes them, and makes content available for grounded retrieval.
+
+### Step 1 — Create the SFDRIVE library
 
 ```bash
 sf agent adl create \
@@ -207,7 +357,7 @@ Read the JSON response and capture `result.libraryId`:
 LIBRARY_ID="<paste result.libraryId from the response>"
 ```
 
-## Step 2 — Upload file(s) and wait for READY
+### Step 2 — Upload file(s) and wait for READY
 
 The `upload` command handles the entire flow: readiness check, presigned URL, S3 upload, indexing trigger, and polling.
 
@@ -250,7 +400,7 @@ The `--wait 10` flag polls until the library reaches READY (up to 10 minutes). W
 
 If you omit `--wait`, the command returns immediately with `status: IN_PROGRESS`. Use `sf agent adl status` or `sf agent adl get` to check readiness later.
 
-### Checking status manually
+#### Checking status manually
 
 ```bash
 sf agent adl status -i "$LIBRARY_ID" --target-org "$TARGET_ORG"
@@ -258,7 +408,7 @@ sf agent adl status -i "$LIBRARY_ID" --target-org "$TARGET_ORG"
 
 Shows stage progression: `DATA_LAKE_OBJECT → DATA_MODEL_OBJECT → SEARCH_INDEX → INDEXING → RETRIEVER`
 
-### Confirming readiness
+#### Confirming readiness
 
 ```bash
 sf agent adl get -i "$LIBRARY_ID" --target-org "$TARGET_ORG" --json
@@ -271,7 +421,7 @@ At this point the parent skill receives:
 - `retrieverId` — from Step 2 response
 - `rag_feature_config_id` — from Step 2 response (or computed as `"ARFPC_" + libraryId`)
 
-## Step 3 — (Optional) Add more files to an existing library
+### Step 3 — (Optional) Add more files to an existing library
 
 For day-2 incremental additions to an already-provisioned SFDRIVE library:
 
@@ -291,13 +441,13 @@ Constraints:
 - Total file count in the library must stay ≤ 1000.
 - Only works on SFDRIVE libraries.
 
-### List files in the library
+#### List files in the library
 
 ```bash
 sf agent adl file list -i "$LIBRARY_ID" --target-org "$TARGET_ORG"
 ```
 
-### Delete a file
+#### Delete a file
 
 ```bash
 sf agent adl file delete -i "$LIBRARY_ID" --file-id "<fileId>" --target-org "$TARGET_ORG"
@@ -493,15 +643,16 @@ If the assignment lands but grounded queries still return empty results, also ch
 - Step 5 returns `INVALID_REQUEST_STATE: "One or more files have not been uploaded..."` despite a successful S3 200 → the org's `bypass-s3-file-exist` gate hasn't rolled out. Skip ADL on this pass; the user can upload via the Setup UI later.
 - `.agent` validation fails with `unresolved reference @knowledge.rag_feature_config_id` → the top-level `knowledge:` block is missing or misordered. It must precede `language:` per Core Language Section 2.
 - Agent published, ADL indexed (`retrieverId` populated), but every grounded query returns empty `knowledgeSummary` and the agent refuses → Einstein Agent User lacks Data Cloud access. See "Wiring → Permission prerequisite" above and [Agent User Setup, Step 3b](agent-user-setup.md).
+- `"To create a File data library, enable Agentforce in your org. Required org preferences: EinsteinGPTPlatformEnabled, AgentPlatformEnabled"` → Deploy both `EinsteinGpt.settings-meta.xml` AND `AgentPlatform.settings-meta.xml`. See [Org Setup for ADL](org-setup-for-adl.md) Steps 0a and 0b2.
 
-## Reference
+### Reference (Option A)
 
 - Grounding source type: `SFDRIVE` (File)
 - All operations use `sf agent adl` CLI commands which auto-negotiate API version
 
 ---
 
-## Part B: KNOWLEDGE — Knowledge Article Library
+## Option B: KNOWLEDGE — Knowledge Article Library
 
 Use this when the org has Salesforce Knowledge articles (KAV) and the user wants to ground the agent on article content. No file upload needed — the library indexes directly from Knowledge articles.
 
@@ -596,7 +747,7 @@ Important constraints:
 
 ---
 
-## Part C: RETRIEVER — Custom Retriever Library
+## Option C: RETRIEVER — Custom Retriever Library
 
 Use this when the user has an existing active Custom Retriever and wants to wrap it in an ADL library. No file upload or indexing needed — the library is immediately ready.
 
