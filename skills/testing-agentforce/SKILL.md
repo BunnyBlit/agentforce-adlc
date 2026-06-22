@@ -189,41 +189,33 @@ See `references/preview-testing.md` for full diagnosis table mapping trace steps
 
 > Full reference: `references/batch-testing.md`
 
-### Always Prefer NGT
+### Always Prefer NGT When Available
 
-Mode B has two test runners, and they are not equivalent:
+Mode B has two test runners:
 
-- **`agentforce-studio` (NGT, the default choice)** -- `AiTestingDefinition` metadata. Rich 11-scorer catalog (topic_sequence_match, agent_handoff_match, task_resolution, factuality, coherence, completeness, output_latency_milliseconds, action_sequence_match, instruction_following, persona_adherence, response_format). Supports multi-input test cases that share one scorer set. Requires `@salesforce/plugin-agent >= 1.43.0`.
-- **`testing-center` (legacy fallback only)** -- `AiEvaluationDefinition` metadata. Only three coarse assertions: `expectedTopic`, `expectedActions`, `expectedOutcome`. **Use only when NGT is unavailable** (older `plugin-agent`, or an unsupported org).
+- **`agentforce-studio` (NGT)** -- `AiTestingDefinition` metadata. 11-scorer catalog (topic_sequence_match, action_sequence_match, agent_handoff_match, bot_response_rating, response_match, coherence, conciseness, factuality, completeness, task_resolution, output_latency_milliseconds). Supports multi-input test cases that share one scorer set. Requires project `sourceApiVersion >= 66.0`.
+- **`testing-center` (legacy)** -- `AiEvaluationDefinition` metadata. Three coarse assertions: `expectedTopic`, `expectedActions`, `expectedOutcome`. Works on any `sourceApiVersion`.
 
-**Default to NGT** for every new test suite. Only fall back to legacy if the detection probe below shows NGT isn't supported on this machine. There is no quality reason to author legacy specs when NGT is available -- the scorer catalog strictly supersedes the legacy assertion set.
+**Prefer NGT whenever the project supports it.** The scorer catalog strictly supersedes the legacy three-assertion model — finer-grained coverage, multi-input cases, first-class quality scoring. The detection probe below picks NGT when the project supports it and falls back to legacy otherwise. If a project is below `sourceApiVersion 66.0`, suggest upgrading so future test work can use NGT — but don't block: legacy is the right answer for that project today.
 
 ### Detecting NGT Support
 
-Two gates must both pass before authoring an NGT spec. Run this probe at the start of a Mode B session:
+`AiTestingDefinition` is a Metadata API v66.0 type, so a project's `sourceApiVersion` must be `66.0` or higher or the deploy step will reject NGT metadata. Run this probe at the start of a Mode B session:
 
 ```bash
 ngt_supported=true
 
-# Gate 1: CLI capability -- does plugin-agent expose the --test-runner flag?
-if ! sf agent generate test-spec --help 2>/dev/null | grep -q 'test-runner'; then
-  echo "[NGT gate 1 FAIL] plugin-agent missing --test-runner support."
-  echo "  Fix: sf plugins install @salesforce/plugin-agent@latest   (need >=1.43.0)"
-  ngt_supported=false
-fi
-
-# Gate 2: Project capability -- does sfdx-project.json declare sourceApiVersion >= 66.0?
 PROJECT_JSON="$(git rev-parse --show-toplevel 2>/dev/null)/sfdx-project.json"
 if [ -f "$PROJECT_JSON" ]; then
   API_VERSION=$(jq -r '.sourceApiVersion // "0"' "$PROJECT_JSON")
   # Compare as floats; AiTestingDefinition requires 66.0+
   if [ "$(awk -v v="$API_VERSION" 'BEGIN{print (v+0 >= 66.0)}')" != "1" ]; then
-    echo "[NGT gate 2 FAIL] sfdx-project.json sourceApiVersion is $API_VERSION (need >=66.0)."
+    echo "[NGT gate FAIL] sfdx-project.json sourceApiVersion is $API_VERSION (need >=66.0)."
     echo "  Fix: edit sfdx-project.json and set \"sourceApiVersion\": \"66.0\" (or higher)"
     ngt_supported=false
   fi
 else
-  echo "[NGT gate 2 SKIP] no sfdx-project.json found at repo root -- can't validate project API version."
+  echo "[NGT gate SKIP] no sfdx-project.json found at repo root -- can't validate project API version."
   ngt_supported=false
 fi
 
@@ -234,11 +226,7 @@ else
 fi
 ```
 
-Gate semantics:
-- **Gate 1 (CLI)**: machine-local. Required to drive `sf agent generate test-spec --test-runner agentforce-studio`.
-- **Gate 2 (project)**: per-repo. `AiTestingDefinition` is only available at Metadata API `66.0+`. A `64.0` project's deploy will reject NGT metadata even if the CLI emits it.
-
-If either gate fails, surface the specific fix once and fall back to legacy. Do not block the user, but make the upgrade path obvious. There is no quality reason to choose legacy when both gates pass.
+If the gate fails, surface the upgrade path once and fall back to legacy for the current session. Do not block the user — legacy is the right answer for projects below 66.0.
 
 ### Scorer Catalog
 
@@ -285,34 +273,18 @@ Scorer-selection rules when authoring a spec:
   - `bot_response_rating` — the response judged against an `expected:` rubric the test author writes.
   - `response_match` — the response judged for semantic match to an `expected:` exemplar.
 - Use `task_resolution` for multi-turn flows — graded 0–5 on whether the user's underlying ask got resolved. **Requires `conversationHistory`** on the test case; the CLI will refuse to scaffold it otherwise.
-- `output_latency_milliseconds` is the only numeric scorer — pair it with a threshold check in your CI when latency SLAs matter.
+- `output_latency_milliseconds` is the only numeric scorer — it reports a raw millisecond figure, so threshold comparison happens downstream of the runner.
 - Unknown scorer names are **not rejected at the CLI** — `validateNgtSpec` only emits a warning. The org-side metadata validator is the authoritative gate, so a typo will fail at deploy, not at author time.
 
-### Authoring with `sf agent generate test-spec`
+### Authoring a Test Spec
 
-The CLI command authors both legacy and NGT specs:
+Write the YAML file directly. Full NGT schema (multi-input cases, `conversationHistory`, `contextVariables`, error surface) lives in `references/ngt-batch-testing.md`; full legacy schema in `references/batch-testing.md`.
 
-```bash
-# Interactive legacy (default -- no flag needed)
-sf agent generate test-spec
-
-# Interactive NGT (1.43.0+)
-sf agent generate test-spec --test-runner agentforce-studio
-
-# Reverse XML -> YAML (1.43.0+, runner auto-inferred from extension)
-sf agent generate test-spec \
-  --from-definition force-app/main/default/aiTestingDefinitions/MySuite.aiTestingDefinition-meta.xml
-
-# Reverse with legacy XML (works on any plugin-agent version)
-sf agent generate test-spec \
-  --from-definition force-app/main/default/aiEvaluationDefinitions/MySuite.aiEvaluationDefinition-meta.xml
-```
-
-Default output paths:
-- Legacy: `specs/<AgentApiName>-testSpec.yaml`
+Pick the file shape based on the detection probe above. Default output paths (so other tooling can find specs):
 - NGT: `specs/<AgentApiName>-ngtTestSpec.yaml`
+- Legacy: `specs/<AgentApiName>-testSpec.yaml`
 
-### Test Spec YAML Format
+NGT spec, minimum viable:
 
 ```yaml
 name: "OrderService Smoke Tests"
@@ -320,63 +292,62 @@ subjectType: AGENT
 subjectName: OrderService          # BotDefinition DeveloperName (API name)
 
 testCases:
-  - utterance: "Where is my order #12345?"
-    expectedTopic: order_status
-    expectedOutcome: "Agent checks order status"
+  - inputs:
+      - utterance: "Where is my order #12345?"
+    scorers:
+      - name: topic_sequence_match
+        expected: order_status
+      - name: factuality            # LLM-judged quality scorer
 
-  - utterance: "I want to return my order"
-    expectedTopic: returns
-    expectedActions:
-      - lookup_order              # Use Level 2 INVOCATION names, NOT Level 1 definitions
-
-  - utterance: "What's the best recipe for chocolate cake?"
-    expectedOutcome: "Agent politely declines and redirects"
+  - inputs:
+      - utterance: "I want to return my order"
+    scorers:
+      - name: action_sequence_match
+        expected: "['lookup_order']"   # Level 2 INVOCATION names, NOT Level 1 definitions
+      - name: completeness
 ```
 
-**Key rules:**
-- `expectedActions` is a **flat string array** with **Level 2 invocation names** (from `reasoning: actions:`), NOT Level 1 definition names (from `subagent: actions:`)
-- Action assertion uses **superset matching** -- test PASSES if actual actions include all expected
-- **Always add `expectedOutcome`** -- most reliable assertion type (LLM-as-judge)
-- For guardrail tests, omit `expectedTopic` and use `expectedOutcome` only. Filter out `topic_assertion` FAILURE for these (false negatives from empty assertion XML).
+**Key NGT rules:**
+- `expectedActions` becomes `action_sequence_match.expected:` as a Python-list-string of **Level 2 invocation names** (from `reasoning: actions:`).
+- NGT's `action_sequence_match` is **order-sensitive** (sequence equality), unlike legacy's superset match. Align the list with the actual invocation order, or swap to `response_match` for a looser check.
+- Pair a deterministic scorer (`topic_sequence_match` / `action_sequence_match` / `agent_handoff_match`) with at least one LLM-judged scorer for full coverage.
+- For round-tripping deployed XML back to YAML, `sf agent generate test-spec --from-definition <xml>` works for both shapes (extension-inferred runner; legacy is shipped, NGT lands in 1.43.0).
 
-### Deploy and Run
+### Deploy and Run (NGT)
 
 ```bash
-# Deploy test suite
-sf agent test create --json --spec /tmp/spec.yaml --api-name MySuite -o <org>
+# Deploy as AiTestingDefinition. --test-runner is the only NGT-specific flag.
+sf agent test create --json \
+  --test-runner agentforce-studio \
+  --spec /tmp/spec.yaml \
+  --api-name MySuite \
+  -o <org>
 
-# Run and wait
+# Run and wait. Runner is auto-detected from the suite name; pass --test-runner
+# only when AmbiguousTestDefinition tells you names collide across both metadata types.
 sf agent test run --json --api-name MySuite --wait 10 --result-format json -o <org> | tee /tmp/run.json
-
-# Get results (ALWAYS use --job-id, NOT --use-most-recent)
 JOB_ID=$(python3 -c "import json; print(json.load(open('/tmp/run.json'))['result']['runId'])")
-sf agent test results --json --job-id "$JOB_ID" --result-format json -o <org> | tee /tmp/results.json
 ```
 
-### Parse Results
+Drop `--test-runner agentforce-studio` from `sf agent test create` to deploy a legacy spec; everything else is identical.
+
+### Read Results
+
+Use the CLI's built-in formatters — don't roll your own parser:
 
 ```bash
-python3 -c "
-import json
-data = json.load(open('/tmp/results.json'))
-for tc in data['result']['testCases']:
-    utterance = tc['inputs']['utterance'][:50]
-    results = {r['name']: r['result'] for r in tc.get('testResults', [])}
-    topic = results.get('topic_assertion', 'N/A')
-    action = results.get('action_assertion', 'N/A')
-    outcome = results.get('output_validation', 'N/A')
-    print(f'{utterance:<50} topic={topic:<6} action={action:<6} outcome={outcome}')
-"
+sf agent test results --job-id "$JOB_ID" --result-format human -o <org>          # readable table
+sf agent test results --job-id "$JOB_ID" --result-format junit -o <org> > junit.xml  # JUnit XML
+sf agent test results --json --job-id "$JOB_ID" -o <org> | tee /tmp/results.json  # raw JSON envelope
 ```
+
+The `--result-format human` table already shows Scorer / Result / Expected / Actual / Reasoning. The `--json` envelope is also available when you need to walk results programmatically. Inside it, `scorerResponse` and `subjectResponse` are both **JSON-encoded strings** — `json.loads()` them before reading; don't slice or split.
+
+Full result-shape reference (legacy `testResults` vs NGT `testScorerResults`, the `status` / `actualValue` / `expectedValue` / `score` / `reasoning` shape inside each `scorerResponse`, and a custom-gate example): see `references/test-report-format.md` and `references/ngt-batch-testing.md` → Phase 3.
 
 ### Topic Name Resolution
 
-Topic names in Testing Center may differ from `.agent` file names. If assertions fail on subagent routing:
-1. Run test with best-guess names
-2. Check actual: `jq '.result.testCases[].generatedData.topic' /tmp/results.json`
-3. Update YAML with actual runtime names and redeploy with `--force-overwrite`
-
-**Topic hash drift**: Runtime hash suffix changes after agent republish. Re-run discovery after each publish.
+If `topic_sequence_match` (NGT) or `topic_assertion` (legacy) FAILs on what looks like correct routing, the cause is usually **promoted topics** — topics published from one org to another, whose runtime name gets a hash suffix that changes every `sf agent publish authoring-bundle`. The expected name in your YAML must match the current hashed name, not the short name in the `.agent` file. See `references/ngt-batch-testing.md` → **Topic Name Resolution** for the lookup workflow.
 
 See `references/batch-testing.md` for full YAML field reference, multi-turn examples, known bugs, and auto-generation from `.agent` files.
 
