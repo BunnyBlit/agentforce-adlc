@@ -41,6 +41,42 @@ Test Case 2: "I want to return this"
   Retry Result: Correctly routed (pass)
 ```
 
+## Legacy Result JSON Shape
+
+The `--json` envelope from `sf agent test results` for legacy runs surfaces per-case assertions under `testCases[].testResults[]`. Each entry has these fields:
+
+| Field | Meaning |
+|---|---|
+| `name` / `metricLabel` | One of three fixed values — see assertion-name mapping below |
+| `result` | `"PASS"` / `"FAILURE"` / `"ERROR"` — the canonical pass/fail field |
+| `status` | Run-state for this assertion — `"COMPLETE"` on a finished test, `"RETRY"` while the runner is reattempting. Distinct from `result`. |
+| `expectedValue` | The YAML's `expectedTopic` / `expectedActions` value, echoed back |
+| `actualValue` | What the agent did. **Empty string when the runner failed to invoke the bot** (e.g. no active BotVersion). |
+| `score` | `0` or `1` — a numeric mirror of `result`. Not load-bearing; prefer `result`. |
+| `errorCode` / `errorMessage` | Populated when the assertion errored. `errorMessage: "Retrying (N/M) due to: <reason>"` appears on each assertion while the runner retries. |
+| `startTime` / `endTime` | ISO-8601 timestamps |
+
+### Assertion-name mapping (XML → JSON result)
+
+The XML metadata uses one set of assertion names; the JSON result envelope renames them. Scripts parsing the result JSON should grep for the JSON-side names — the XML names do not appear in the result envelope at all.
+
+| YAML field | XML `<expectation><name>` | JSON `name` / `metricLabel` |
+|---|---|---|
+| `expectedTopic` | `topic_sequence_match` | `topic_assertion` |
+| `expectedActions` | `action_sequence_match` | `actions_assertion` |
+| (implicit, always present) | `bot_response_rating` | `output_validation` |
+
+The CLI's `--result-format human` table hides this drift — it labels the columns "Topic" / "Action" / "Outcome" regardless of which side you're looking at.
+
+### Legacy failure mode when no active BotVersion exists
+
+When the subject bot has no `BotVersion.Status = 'Active'`, the legacy runner does **not** return `testCases: []` (that's the NGT failure mode). Instead it returns the full set of N test cases with:
+- Top-level `status: "IN_PROGRESS"` and no `runId`
+- Per-case `status: "RETRY"` and `errorMessage: "Retrying (N/M) due to: Unknown error"`
+- Per-assertion `result: "FAILURE"`, `status: "RETRY"`, and `actualValue: ""` (empty string)
+
+This is the same root cause as the NGT `testCases: []` silent-failure mode — just a different envelope. The Pre-Run Probe in `SKILL.md` catches both before the wait.
+
 ## Coverage Analysis
 
 Track which subagents and actions are tested across both modes:
@@ -172,7 +208,7 @@ The `--json` envelope from `sf agent test results` has a different shape for NGT
 | Axis | Legacy (`AiEvaluationDefinition`) | NGT (`AiTestingDefinition`) |
 |------|-----------------------------------|------------------------------|
 | Per-case assertions container | `testCases[].testResults[]` | `testCases[].testScorerResults[]` |
-| Assertion identifier | `name` is one of three fixed values | `scorerName` is any scorer from the catalog |
+| Assertion identifier | `name` is one of three fixed values (`topic_assertion` / `actions_assertion` / `output_validation` — see Legacy Result JSON Shape above) | `scorerName` is any scorer from the catalog |
 | Pass/fail field | `result: PASS / FAILURE / ERROR` | `scorerResponse` (JSON-encoded string) |
 | Agent's actual response | `generatedData.outcome` | `subjectResponse` (JSON-encoded string, sibling of `testScorerResults`) |
 | Agent's runtime topic | `generatedData.topic` | Not directly exposed; read it out of the `topic_sequence_match` scorer's `actualValue` |

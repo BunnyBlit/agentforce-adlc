@@ -336,6 +336,32 @@ JOB_ID=$(python3 -c "import json; print(json.load(open('/tmp/run.json'))['result
 
 Drop `--test-runner agentforce-studio` from `sf agent test create` to deploy a legacy spec; everything else is identical.
 
+#### Pre-Run Probe: Subject Bot Must Have an Active Version
+
+`sf agent test run` does NOT validate that the subject bot has an active version. If no `BotVersion.Status = 'Active'` exists for the subject, the runner returns `status: COMPLETED` with `testCases: []` and **no error message** — the same shape a successful zero-case run would produce. This silently masks the real problem.
+
+`sf agent publish authoring-bundle` does NOT activate the bot — it creates a new `BotVersion` but leaves all versions `Inactive`. Activation is a separate command: `sf agent activate --api-name <bot> --version <N> -o <org>`.
+
+Run this probe immediately after `sf agent test create` and before `sf agent test run`:
+
+```bash
+# subjectName from the YAML — the BotDefinition.DeveloperName
+SUBJECT=$(python3 -c "import yaml; print(yaml.safe_load(open('/tmp/spec.yaml'))['subjectName'])")
+
+ACTIVE_COUNT=$(sf data query --target-org <org> --json \
+  --query "SELECT COUNT() FROM BotVersion WHERE BotDefinition.DeveloperName='${SUBJECT}' AND Status='Active'" \
+  2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['totalSize'])")
+
+if [ "$ACTIVE_COUNT" = "0" ]; then
+  echo "ABORT: Subject bot '${SUBJECT}' has no Active BotVersion. 'sf agent test run' will silently return 0 test cases." >&2
+  echo "Activate a version with: sf agent activate --api-name ${SUBJECT} --version <N> -o <org>" >&2
+  echo "If activation fails with 'This Agent Type should have a user assigned', the bot is missing a runtime user assignment — see /developing-agentforce for the activation runbook." >&2
+  exit 1
+fi
+```
+
+The same rule applies to legacy `AiEvaluationDefinition` runs (the runner has the same silent-empty-result behavior). The probe is cheap; run it for both modes.
+
 ### Read Results
 
 Use the CLI's built-in formatters — don't roll your own parser:
